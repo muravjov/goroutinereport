@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/muravjov/goroutinereport/report"
+	report "github.com/muravjov/goroutinereport"
 )
 
 func main() {
