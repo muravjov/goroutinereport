@@ -1,0 +1,7 @@
+.vscode
+
+# vscode-go
+__debug_bin
+debug
+debug.test
+
