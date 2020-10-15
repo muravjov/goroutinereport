@@ -4,7 +4,7 @@
 `Goroutine Report` shows where and how much your Golang app creates goroutines.
 
 ```bash
-    $ go get github.com/muravjov/goroutinereport
+    $ go get github.com/muravjov/goroutinereport/goroutinereport
     $ curl http://localhost:6060/debug/pprof/goroutine?debug=2 | goroutinereport  | head -n 30
 Created By                                                                                                                        Goroutine Count
                                                                                                                                   
