@@ -2,20 +2,22 @@ package report
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"os"
+	"regexp"
 	"runtime"
 	"sort"
 	"text/tabwriter"
 
-	"github.com/maruel/panicparse/stack"
+	"github.com/maruel/panicparse/v2/stack"
+	"github.com/muravjov/goroutinereport/internal"
 )
 
 type createItem struct {
 	sig   *stack.Signature
 	count int
+	IDs   []int
 }
 
 type createList []createItem
@@ -27,12 +29,48 @@ func (a createList) Less(i, j int) bool {
 }
 
 func Report(reader io.Reader, writer io.Writer) error {
-	goroutines, err := stack.ParseDump(reader, ioutil.Discard, false)
-	if err != nil {
-		return err
+	opts := stack.DefaultOpts()
+
+	var snapshot *stack.Snapshot
+	var snapshotSuffix []byte
+
+	accumulate := func(s *stack.Snapshot) {
+		if s == nil {
+			return
+		}
+
+		if snapshot == nil {
+			snapshot = s
+		} else {
+			snapshot.Goroutines = append(snapshot.Goroutines, s.Goroutines...)
+		}
 	}
 
-	buckets := stack.Aggregate(goroutines.Goroutines, stack.AnyValue)
+	for {
+		s, suffix, err := stack.ScanSnapshot(reader, io.Discard, opts)
+		if err != nil {
+			if err == io.EOF {
+				accumulate(s)
+				snapshotSuffix = suffix
+				break
+			}
+			return err
+		}
+
+		reader = io.MultiReader(bytes.NewReader(suffix), reader)
+		accumulate(s)
+	}
+
+	if snapshot == nil {
+		return errors.New("no go stacks found")
+	}
+
+	if snapshot.IsRace() {
+		return errors.New("not for race detector stacks")
+	}
+
+	aggregated := snapshot.Aggregate(stack.AnyValue)
+	buckets := aggregated.Buckets
 
 	cl := createList{}
 	for _, b := range buckets {
@@ -41,6 +79,7 @@ func Report(reader io.Reader, writer io.Writer) error {
 		cl = append(cl, createItem{
 			&b.Signature,
 			len(b.IDs),
+			b.IDs,
 		})
 	}
 
@@ -61,62 +100,39 @@ func Report(reader io.Reader, writer io.Writer) error {
 	fmtPrintln := func(a ...interface{}) (n int, err error) {
 		return fmt.Fprintln(writer, a...)
 	}
-	fmtPrintf := func(format string, a ...interface{}) (n int, err error) {
-		return fmt.Fprintf(writer, format, a...)
-	}
+	//fmtPrintf := func(format string, a ...interface{}) (n int, err error) {
+	//	return fmt.Fprintf(writer, format, a...)
+	//}
 
-	for i, _ := range cl {
+	for i := range cl {
 		ci := cl[len(cl)-i-1]
-		// fmtPrintf("%s:%s\t\t%d\n", ci.sig.CreatedBy.Func.Name(), ci.sig.CreatedBy.FullSrcLine(), ci.count)
-		writeColumn("%s:%s\t%d", ci.sig.CreatedBy.Func.Name(), ci.sig.CreatedBy.FullSrcLine(), ci.count)
+
+		name := "UnknownFunc:UnknownLine"
+		if n := internal.CreatedByString(ci.sig); n != "" {
+			name = n
+		}
+
+		writeColumn("%s\t%d:%v", name, ci.count, ci.IDs)
 	}
 	w.Flush()
+
+	if len(snapshotSuffix) > 0 {
+		fmtPrintln()
+		fmtPrintln("==== Suffix ================")
+		fmtPrintln()
+
+		fmtPrintln(string(snapshotSuffix))
+	}
 
 	fmtPrintln()
 	fmtPrintln("=======================================")
 	fmtPrintln()
 
-	srcLen := 0
-	pkgLen := 0
-	for _, bucket := range buckets {
-		for _, line := range bucket.Signature.Stack.Calls {
-			if l := len(line.FullSrcLine()); l > srcLen {
-				srcLen = l
-			}
-			if l := len(line.Func.PkgName()); l > pkgLen {
-				pkgLen = l
-			}
-		}
-	}
+	p := &internal.Palette{}
+	var filter *regexp.Regexp
+	var match *regexp.Regexp
 
-	for i, _ := range cl {
-		ci := cl[len(cl)-i-1]
-
-		// Print the goroutine header.
-		extra := ""
-		if s := ci.sig.SleepString(); s != "" {
-			extra += " [" + s + "]"
-		}
-		if ci.sig.Locked {
-			extra += " [locked]"
-		}
-		if c := ci.sig.CreatedByString(false); c != "" {
-			extra += " [Created by " + c + "]"
-		}
-		fmtPrintf("%d: %s%s\n", ci.count, ci.sig.State, extra)
-
-		// Print the stack lines.
-		for _, line := range ci.sig.Stack.Calls {
-			fmtPrintf(
-				"    %-*s %-*s %s(%s)\n",
-				pkgLen, line.Func.PkgName(), srcLen, line.FullSrcLine(),
-				line.Func.Name(), &line.Args)
-		}
-		if ci.sig.Stack.Elided {
-			io.WriteString(os.Stdout, "    (...)\n")
-		}
-	}
-	return nil
+	return internal.WriteBucketsToConsole(writer, p, aggregated, false, filter, match)
 }
 
 func ReportSelf(writer io.Writer) error {
